@@ -4,8 +4,11 @@ import os
 import itertools
 import string
 import copy
+import pylab
+from matplotlib import cm
+from matplotlib.colors import LinearSegmentedColormap
 
-# Dependencies: numpy, scipy, pandas, igraph
+# Dependencies: numpy, scipy, pandas, igraph, pylab, matplotlib
 
 import numpy
 import scipy.stats
@@ -13,7 +16,6 @@ import pandas
 from igraph import *
 
 from filter_data_methods import *
-
 
 def chisquared_test(morph1, morph2, axs, ays, alpha = 0.001, test_type = 'chi2'):
 	"""
@@ -1279,11 +1281,9 @@ def run_transCSSR(word_lookup_marg, word_lookup_fut, L_max, axs, ays, e_symbols,
 	morph_by_state = {}
 	
 	# The degrees of freedom for the hypothesis test. It is
-	# the cardinality of the output alphabet minus 1.
+	# the cardinality of the input/output alphabet minus 1.
 	
-	# df = len(axs)*(len(ays) - 1)
 	df = len(axs)*len(ays) - 1
-	# df = (len(axs)-1)*(len(ays) - 1)
 
 	# Stage 1: Initialize.
 	# 
@@ -1380,6 +1380,7 @@ def run_transCSSR(word_lookup_marg, word_lookup_fut, L_max, axs, ays, e_symbols,
 													if pvalue > cur_best_pvalue:
 														cur_best_pvalue = pvalue
 														cur_best_state = altstate
+									
 										
 										if cur_best_state == -1:
 											is_matching_state = False
@@ -1391,6 +1392,7 @@ def run_transCSSR(word_lookup_marg, word_lookup_fut, L_max, axs, ays, e_symbols,
 										
 											for emission_ind in range(len(e_symbols)):
 												morph_by_state[cur_best_state][emission_ind] += morph_by_history[emission_ind]
+											
 								
 									if not is_matching_state:
 										# Create a new state
@@ -1985,3 +1987,1032 @@ def run_tests_transCSSR(fnameX, fnameY, epsilon, invepsilon, morph_by_state, axs
 			correct_rates[line_ind] = compute_metrics(ts_true, ts_prediction, metric = metric)
 
 	return correct_rates
+
+def load_transition_matrix_transducer(fname):
+	"""
+	Load the transition matrix for an epsilon-transducer
+	stored in the .dot format.
+
+	Parameters
+	----------
+	fname : string
+			The filename (including the path) for a
+			dot file that stores the epsilon-transducer.
+
+	Returns
+	-------
+	trans_matrix : dictionary
+			A lookup that maps (from_state, x, y) to
+			(to_state, p). Thus, this applies the
+			transition dynamic on seeing (x, y) in
+			state from_state to determine to_state,
+			and also returns
+			P(S_{1}, Y_{1} | X_{1}, S_{0}).
+	states : list
+			A list storing the names of the states in
+			the dot file.
+
+	Notes
+	-----
+	Any notes go here.
+
+	Examples
+	--------
+	>>> import module_name
+	>>> # Demonstrate code here.
+
+	"""
+	
+	trans_matrix = {}
+	
+	states = {}
+	
+	with open(fname) as ofile:
+		for line in ofile:
+			if '->' in line:
+				from_state = line.split(' -> ')[0]
+				to_state   = line.split(' -> ')[1].split(' [')[0]
+				
+				states[from_state] = True
+				states[to_state]   = True
+				
+				transitions = line.split('\"')[1].split('\l')
+				
+				for transition in transitions[:-1]:
+					y = transition.split('|')[0]
+					x = transition.split('|')[1].split(':')[0]
+					
+					p = float(transition.split('|')[1].split(':')[1])
+					
+					trans_matrix[(from_state, x, y)] = (to_state, p)
+	return trans_matrix, states.keys()
+
+def load_transition_matrix_machine(fname, inf_alg):
+	"""
+	Load the transition matrix for an epsilon-machine
+	stored in the .dot format.
+
+	Parameters
+	----------
+	fname : string
+			The filename (including the path) for a
+			dot file that stores the epsilon-machine.
+	inf_alg : string
+			The inference algorithm used to estimate the machine.
+			One of {'CSSR', 'transCSSR'}
+
+	Returns
+	-------
+	trans_matrix : dictionary
+			A lookup that maps (from_state, x) to
+			(to_state, p). Thus, this applies the
+			transition dynamic on seeing x in
+			state from_state to determine to_state,
+			and also returns
+			P(S_{1}, X_{1} | S_{0}).
+	states : list
+			A list storing the names of the states in
+			the dot file.
+	
+	Notes
+	-----
+	Any notes go here.
+
+	Examples
+	--------
+	>>> import module_name
+	>>> # Demonstrate code here.
+
+	"""
+	
+	trans_matrix = {}
+	
+	states = {}
+	
+	with open(fname) as ofile:
+		for line in ofile:
+			if '->' in line:
+				from_state = line.split(' -> ')[0]
+				to_state   = line.split(' -> ')[1].split(' [')[0]
+				
+				states[from_state] = True
+				states[to_state]   = True
+				
+				transitions = line.split('\"')[1].split('\l')
+				
+				for transition in transitions[:-1]:
+					if inf_alg == 'CSSR':
+						x = transition.split(':')[0]
+					elif inf_alg == 'transCSSR':
+						x = transition.split(':')[0].split('|')[0]
+					
+					if r'\l' in transition:
+						p = float(transition.split(':')[1].split(r'\l')[0])
+					else:
+						p = float(transition.split(':')[1].strip())
+					
+					trans_matrix[(from_state, x)] = (to_state, p)
+					
+	return trans_matrix, states.keys()
+
+def compute_mixed_transition_matrix(machine_fname, transducer_fname, axs, ays, inf_alg):
+	"""
+	Given an epsilon-machine for the input process and an epsilon-transducer
+	for the input-output process, compute_mixed_transition_matrix returns
+	the transition matrix for the mixed state representation of the 
+	joint process. The mixed states correspond to the direct product
+	of the input causal states and the channel causal states.
+	
+	Note: This is *not* the minimal representation of the joint process,
+	which is given by the joint epsilon-machine.
+
+	Parameters
+	----------
+	machine_fname : string
+			The path to the input epsilon-machine in dot format.
+	transducer_fname : string
+			The path to the input-output epsilon-transducer
+			in dot format.
+	axs : list
+			The input alphabet.
+	ays : list
+			The output alphabet.
+	inf_alg : string
+			The inference algorithm used to estimate the machine.
+			One of {'CSSR', 'transCSSR'}
+
+	Returns
+	-------
+	P, T_states_to_index, M_states_to_index
+	P : numpy array
+			The transition matrix for the Markov
+			chain associated with the mixed states.
+	T_states_to_index : dict
+			An ordered lookup for the channel
+			causal states.
+	M_states_to_index : dict
+			An ordered lookup for the machine
+			causal states.
+
+	Notes
+	-----
+	Any notes go here.
+
+	Examples
+	--------
+	>>> import module_name
+	>>> # Demonstrate code here.
+
+	"""
+	# Read in the transition matrices for the 
+	# input process epsilon-machine and the
+	# epsilon-transducer.
+
+	T_trans, T_states = load_transition_matrix_transducer('/Users/daviddarmon/Dropbox/transfer/orc-wordmap/{}'.format(transducer_name))
+	M_trans, M_states = load_transition_matrix_machine('/Users/daviddarmon/Dropbox/transfer/orc-wordmap/{}'.format(machine_name), inf_alg)
+
+	# Determine the number of states resulting from a
+	# direct product of the epsilon-machine and
+	# epsilon-transducer states.
+
+	num_mixed_states = len(T_states)*len(M_states)
+
+	# Store the mixed state-to-mixed state transition
+	# probabilities.
+
+	# Note: We store these as P[i, j] = P(S_{1} = i | S_{0} = j),
+	# e.g. p_{i<-j}, the opposite of the usual way of storing
+	# transition probabilities. We do this so that we can
+	# compute the *right* eigenvectors of the transition matrix
+	# instead of the left eigenvectors.
+
+	P = numpy.zeros(shape = (num_mixed_states, num_mixed_states))
+
+	# Create an ordered lookup for the transducer and 
+	# machine states.
+
+	T_states_to_index = {}
+	M_states_to_index = {}
+
+	for s, T_state in enumerate(T_states):
+		T_states_to_index[T_state] = s
+
+	for s, M_state in enumerate(M_states):
+		M_states_to_index[M_state] = s
+
+	mixed_state_labels = []
+
+	for ST in T_states:
+		i_from = T_states_to_index[ST]
+	
+		T_offset_from = len(M_states)*i_from
+		for SM in M_states:
+			j_from = M_states_to_index[SM]
+		
+			M_offset_from = j_from
+		
+			mixed_state_labels.append((ST, SM))
+
+	# Populate P by traversing *from* each
+	# mixed state, and accumulating the probability
+	# for the states transitioned *to*.
+
+	for ST in T_states:
+		i_from = T_states_to_index[ST]
+	
+		T_offset_from = len(M_states)*i_from
+		for SM in M_states:
+			j_from = M_states_to_index[SM]
+		
+			M_offset_from = j_from
+		
+			for ax in axs:
+				SM_to, pM_to = M_trans.get((SM, ax), (None, 0))
+			
+				if SM_to != None:
+					j_to = M_states_to_index[SM_to]
+			
+					M_offset_to = j_to
+			
+					for ay in ays:
+						ST_to, pT_to = T_trans.get((ST, ax, ay), (None, 0))
+					
+						if ST_to != None:				
+							i_to = T_states_to_index[ST_to]
+				
+							T_offset_to = len(M_states)*i_to
+				
+							P[T_offset_to + M_offset_to, T_offset_from + M_offset_from] += pT_to*pM_to
+	
+	return P, T_states_to_index, M_states_to_index
+
+def compute_channel_states_distribution(P, M_states, T_states):
+	"""
+	Compute the stationary distribution for the mixed state 
+	and channel causal states from the mixed state transition
+	matrix P.
+
+	Parameters
+	----------
+			The transition matrix for the Markov
+			chain associated with the mixed states.
+	M_states : list
+			The causal states of the input process.
+	T_states : list
+			The channel causal states of the transducer.
+
+	Returns
+	-------
+	stationary_dist_mixed : list
+			The stationary distribution for the
+			mixed states.
+	stationary_dist_eT : list
+			The stationary distribution for the
+			channel causal states.
+			
+	Notes
+	-----
+	Any notes go here.
+
+	Examples
+	--------
+	>>> import module_name
+	>>> # Demonstrate code here.
+
+	"""
+	
+	# Compute the eigenvalues (L) and eigenvectors (V)
+	# from the transition matrix P.
+
+	L, V = numpy.linalg.eig(P)
+
+	# Determine which eigenvector corresponds to the 
+	# eigenvalue equal to 1. e.g. find the eigenvector
+	# that is a scalar multiple of the mixed chains
+	# stationary distribution.
+
+	eig_one = numpy.where(numpy.abs(L - 1) < 0.0001)[0][0]
+
+	stationary_dist_mixed = numpy.real(V[:, eig_one])
+
+	# Recover the stationary distribution by forcing
+	# to sum to 1.
+
+	stationary_dist_mixed = stationary_dist_mixed/numpy.sum(stationary_dist_mixed)
+
+	# Recover the stationary distribution over the channel
+	# causal states by marginalizing the stationary
+	# distribution over the mixed states.
+
+	stationary_dist_eT = []
+
+	for T in range(len(T_states)):
+		stationary_dist_eT.append(stationary_dist_mixed[T*len(M_states):(T+1)*len(M_states)].sum())
+	
+	return stationary_dist_mixed, stationary_dist_eT
+
+def compute_conditional_measures(machine_fname, transducer_fname, axs, ays, inf_alg):
+	"""
+	Given an epsilon-machine for the input process and an epsilon-transducer
+	for the input-output process, compute_conditional_measures returns
+	the conditional channel complexity $C_{X}$ and conditional entropy rate $h_{X}$.
+	
+	Note the dependence of these quantities on the *input* process {X_{t}}.
+
+	Parameters
+	----------
+	machine_fname : string
+			The path to the input epsilon-machine in dot format.
+	transducer_fname : string
+			The path to the input-output epsilon-transducer
+			in dot format.
+	axs : list
+			The input alphabet.
+	ays : list
+			The output alphabet.
+	inf_alg : string
+			The inference algorithm used to estimate the machine.
+			One of {'CSSR', 'transCSSR'}
+
+	Returns
+	-------
+	C_X : float
+			The input-dependent channel complexity.
+	h_X : float
+			The input-dependent entropy rate.
+			
+	"""
+	
+	P, T_states, M_states, T_trans, M_trans = compute_mixed_transition_matrix(machine_fname, transducer_fname, axs, ays, inf_alg)
+	
+	stationary_dist_mixed, stationary_dist_eT = compute_channel_states_distribution(P, M_states, T_states)
+	
+	C_X = -numpy.sum(stationary_dist_eT*numpy.log2(stationary_dist_eT))
+	
+	h_X = 0.
+	
+	for ST in T_states:
+		i_from = T_states[ST]
+
+		T_offset_from = len(M_states)*i_from
+		
+		for SM in M_states:
+			j_from = M_states[SM]
+	
+			M_offset_from = j_from
+			
+			sum_over_x = 0.
+			
+			for ax in axs:
+				SM_to, pM_to = M_trans.get((SM, ax), (None, 0))
+		
+				if SM_to != None:
+					j_to = M_states[SM_to]
+		
+					M_offset_to = j_to
+					
+					sum_over_y = 0.
+					
+					for ay in ays:
+						ST_to, pT_to = T_trans.get((ST, ax, ay), (None, 0))
+				
+						if ST_to != None and pT_to != 0:				
+							i_to = T_states[ST_to]
+			
+							T_offset_to = len(M_states)*i_to
+			
+							sum_over_y += pT_to*numpy.log2(pT_to)
+					sum_over_x += sum_over_y*pM_to
+			
+			h_X += sum_over_x*stationary_dist_mixed[T_offset_from + M_offset_from]
+		
+	h_X = -h_X
+	
+	return C_X, h_X
+
+def map_words(xs, ys, trans_matrix, states):
+	"""
+	map_words takes in an input-output pair (x, y)
+	and maps it to its associated transducer
+	state under the transducer stored in 
+	trans_matrix.
+
+	Parameters
+	----------
+	xs : string
+			The input word as a string, read
+			from left (past) to right (future).
+	ys : string
+			The output word as a string, read
+			from left (past) to right (future).
+	trans_matrix : dict
+			The epsilon-transducer, stored as
+			a dictionary that takes
+			
+				(from_state, x, y)
+				
+			as an input, and maps to
+			
+				(to_state, prob).
+	states : list
+			A list containing the states
+			associated with the epsilon-transducer.
+
+	Returns
+	-------
+	s_to : string
+			To state that the joint input-output
+			word (xs, ys) maps to.
+	admissible : boolean
+			Whether the joint input-output word
+			(xs, ys) is admissible under the
+			transducer.
+			
+
+	Notes
+	-----
+	Any notes go here.
+
+	Examples
+	--------
+	>>> import module_name
+	>>> # Demonstrate code here.
+
+	"""
+	L = len(xs)
+	
+	admissible = False
+	for s in states:
+		s_to = s
+		
+		for t in range(L):
+			x = xs[t]
+			y = ys[t]
+			
+			s_to, p = trans_matrix.get((s_to, x, y), (None, -1))
+			
+			if s_to == None:
+				break
+			
+		if s_to != None:
+			admissible = True
+		
+		if admissible:
+			break
+	
+	return s_to, admissible
+
+# transducer_name = '/Users/daviddarmon/Dropbox/transfer/orc-wordmap/OddRandomChannel.dot'
+transducer_name = '/Users/daviddarmon/Dropbox/transfer/orc-wordmap/FeedbackXORChannel.dot'
+
+def generate_wordmap(transducer_fname, L = 8):
+	"""
+	Generate wordmap maps all pasts of length L
+	their associated causal states and displays 
+	this associated word map as in the figures
+	from
+		
+		Computational Mechanics of Input-Output Processes: 
+		Structured transformations and the $\epsilon$-transducer
+	
+	by Jim Crutchfield and Nix Barnett.
+
+	Parameters
+	----------
+	transducer_fname : string
+			The path to the dot file containing the
+			epsilon-transducer.
+	L : int
+			The word length to use for the input-output
+			words.
+
+	Returns
+	-------
+	None
+
+	Notes
+	-----
+	Any notes go here.
+
+	Examples
+	--------
+	>>> import module_name
+	>>> # Demonstrate code here.
+
+	"""
+	
+	trans_matrix, states = load_transition_matrix_transducer('{}'.format(transducer_fname))
+
+	# Generate all binary words of length L, and
+	# test which are admissible via the epsilon-transducer.
+
+	L_pow = 2**L
+
+	cdict = {'red':   [(0.0, 1.0, 1.0),  # red decreases
+	                   (1.0, 0.0, 0.0)],
+
+	         'green': [(0.0, 0.0, 0.0),  # green increases
+	                   (1.0, 1.0, 1.0)],
+
+	         'blue':  [(0.0, 0.0, 0.0),  # no blue at all
+	                   (1.0, 0.0, 0.0)]}
+
+	red_green_cm = LinearSegmentedColormap('RedGreen', cdict, len(states))
+
+	colors = cm.get_cmap(red_green_cm, len(states))
+
+	states_to_col = {}
+
+	for state_ind, state in enumerate(states):
+		states_to_col[state] = state_ind
+
+	for i_word in range(L_pow):
+		xs = format(i_word, '0{}b'.format(L))
+	
+		for j_word in range(L_pow):
+			ys = format(j_word, '0{}b'.format(L))
+		
+			s_to, admissible = map_words(xs, ys, trans_matrix, states)
+		
+			if admissible:
+				x_numeric = 0.
+				y_numeric = 0.
+			
+				xs_flipped = xs[::-1]
+				ys_flipped = ys[::-1]
+			
+				for t in range(L):
+					x_numeric += int(xs_flipped[t])*2.**(-(t+1))
+					y_numeric += int(ys_flipped[t])*2.**(-(t+1))
+				
+			
+				pylab.scatter(x_numeric, y_numeric, s = 3, c = colors(states_to_col[s_to]), edgecolor = 'none')
+		
+	pylab.xlim(xmin = 0, xmax = 1)
+	pylab.ylim(ymin = 0, ymax = 1)
+
+	pylab.axes().set_aspect('equal')
+
+	pylab.show()
+
+def predict_presynch_eM(stringX, machine_fname, axs, inf_alg, M_states_to_index = None, M_trans = None, stationary_dist_eM = None):
+	"""
+	Given an epsilon-machine and a past stringX, predict_presynch_eM
+	returns the predictive distribution
+		P(Xt = x | Xpast = stringX)
+	potentially *before* filtering on the past synchronizes to
+	one causal state.
+
+	Parameters
+	----------
+	stringX : string
+			The string to return the predictive distribution
+			over axs for.
+	machine_fname : string
+			The path to the epsilon-machine in dot format.
+	axs : list
+			The process alphabet.
+	inf_alg : string
+			The inference algorithm used to estimate the machine.
+			One of {'CSSR', 'transCSSR'}
+
+	Returns
+	-------
+	pred_probs : numpy array
+			The probability of the axs, given
+			stringX.
+	cur_states : list
+			The current causal states the process could
+			be in, given stringX.
+
+	Notes
+	-----
+	Any notes go here.
+
+	Examples
+	--------
+	>>> import module_name
+	>>> # Demonstrate code here.
+
+	"""
+	
+	if stationary_dist_eM == None:
+		P, M_states_to_index, M_trans = compute_eM_transition_matrix(machine_fname, axs, inf_alg = inf_alg)
+
+		stationary_dist_mixed, stationary_dist_eM = compute_channel_states_distribution(P, {'A' : 0}, M_states_to_index)
+
+	p_L = 0
+	ps_Lp1 = [0 for x in axs]
+	
+	cur_states = [0 for state in M_states_to_index]
+
+	for SM in M_states_to_index:
+		from_state = SM
+	
+		p_state = stationary_dist_eM[M_states_to_index[SM]]
+	
+		for t in range(len(stringX)):
+			to_state, p = M_trans.get((from_state, stringX[t]), (None, 0))
+		
+			if p == 0:
+				p_state = 0
+				break
+			else:
+				p_state = p_state*p
+		
+			from_state = to_state
+	
+		p_L = p_L + p_state
+	
+		if p_state == 0:
+			pass
+		else:
+			if len(stringX) == 0:
+				cur_states[M_states_to_index[from_state]] = 1
+			else:
+				cur_states[M_states_to_index[to_state]] = 1
+			
+			for x_ind, x in enumerate(axs):
+				to_state, p = M_trans.get((from_state, x), (None, 0))
+		
+				p_state_Lp1 = p_state*p
+		
+				ps_Lp1[x_ind] = ps_Lp1[x_ind] + p_state_Lp1
+
+	pred_probs = numpy.array(ps_Lp1)/float(p_L)
+
+	return pred_probs, cur_states
+
+def compute_eM_transition_matrix(machine_fname, axs, inf_alg):
+	"""
+	Given an epsilon-machine compute_transition_matrix returns
+	the transition matrix for the causal states.
+
+	Parameters
+	----------
+	machine_fname : string
+			The path to the epsilon-machine in dot format.
+	axs : list
+			The process alphabet.
+	inf_alg : string
+			The inference algorithm used to estimate the machine.
+			One of {'CSSR', 'transCSSR'}
+
+	Returns
+	-------
+	P : numpy array
+			The transition matrix for the Markov
+			chain associated with the mixed states.
+	M_states_to_index : dict
+			An ordered lookup for the machine
+			causal states.
+
+	Notes
+	-----
+	Any notes go here.
+
+	Examples
+	--------
+	>>> import module_name
+	>>> # Demonstrate code here.
+
+	"""
+	# Read in the transition matrices for the 
+	# input process epsilon-machine and the
+	# epsilon-transducer.
+
+	M_trans, M_states = load_transition_matrix_machine('{}'.format(machine_fname), inf_alg = inf_alg)
+
+	# Determine the number of states resulting from a
+	# direct product of the epsilon-machine and
+	# epsilon-transducer states.
+
+	num_states = len(M_states)
+
+	# Store the mixed state-to-mixed state transition
+	# probabilities.
+
+	# Note: We store these as P[i, j] = P(S_{1} = i | S_{0} = j),
+	# e.g. p_{i<-j}, the opposite of the usual way of storing
+	# transition probabilities. We do this so that we can
+	# compute the *right* eigenvectors of the transition matrix
+	# instead of the left eigenvectors.
+
+	P = numpy.zeros(shape = (num_states, num_states))
+
+	# Create an ordered lookup for the transducer and 
+	# machine states.
+
+	M_states_to_index = {}
+
+	for s, M_state in enumerate(M_states):
+		M_states_to_index[M_state] = s
+
+	# Populate P by traversing *from* each
+	# causal state, and accumulating the probability
+	# for the states transitioned *to*.
+
+	for SM in M_states:
+		j_from = M_states_to_index[SM]
+	
+		M_offset_from = j_from
+	
+		for ax in axs:
+			SM_to, pM_to = M_trans.get((SM, ax), (None, 0))
+		
+			if SM_to != None:
+				j_to = M_states_to_index[SM_to]
+		
+				M_offset_to = j_to
+			
+				P[M_offset_to, M_offset_from] += pM_to
+	
+	return P, M_states_to_index, M_trans
+
+def predict_presynch_eT(stringX, stringY, machine_fname, transducer_fname, axs, ays, inf_alg, M_states_to_index = None, T_states_to_index = None, M_trans = None, T_trans = None, stationary_dist_mixed = None, stationary_dist_eT = None):
+	"""
+	Given an epsilon-machine for the input process, an
+	epsilon-transducer for the input-output process, 
+	an input past stringX, and an output past stringY,
+	predict_presynch_eT returns the predictive distribution
+		P(Yt = y | Xt = stringX[-1], Xpast = stringX, Ypast = stringY)
+	potentially *before* filtering on the past synchronizes to
+	one causal state.
+
+	Parameters
+	----------
+	stringX : string
+			The input past, including the present.
+	stringY : string
+			The output past, not including the present.
+	machine_fname : string
+			The path to the epsilon-machine in dot format.
+	transducer_fname : string
+			The path to the epsilon-transducer in dot format.
+	axs : list
+			The input process alphabet.
+	ays : list
+			The output process alphabet.
+	inf_alg : string
+			The inference algorithm used to estimate the machine.
+			One of {'CSSR', 'transCSSR'}
+
+	Returns
+	-------
+	pred_probs : numpy array
+			The probability of the ays, given
+			stringX and stringY.
+	cur_states : list
+			The current causal states the process could
+			be in, given stringX and stringY.
+
+	Notes
+	-----
+	Any notes go here.
+
+	Examples
+	--------
+	>>> import module_name
+	>>> # Demonstrate code here.
+
+	"""
+	
+	if M_states_to_index == None or T_states_to_index == None or M_trans == None or T_trans == None or stationary_dist_mixed == None or stationary_dist_eT == None: # Only recompute these if we need to.
+		P, T_states_to_index, M_states_to_index, T_trans, M_trans = compute_mixed_transition_matrix(machine_fname, transducer_fname, axs, ays, inf_alg = 'CSSR')
+		
+		T_states = T_states_to_index.keys()
+		M_states = M_states_to_index.keys()
+		
+		stationary_dist_mixed, stationary_dist_eT = compute_channel_states_distribution(P, M_states, T_states)
+	else:
+		T_states = T_states_to_index.keys()
+		M_states = M_states_to_index.keys()
+
+	# Compute finite-L predictive probabilities:
+	# 
+	# P(Y_{L+1} = y_{L+1} | X_{L+1} = x_{L+1}, X_{1}^{L} = x_{1}^{L}, Y_{1}^{L} = y_{1}^{L})
+
+	p_joint_string_L = 0.
+	p_joint_string_Lp1 = [0. for y in ays]
+
+	p_input_string_L = 0.
+	p_input_string_Lp1 = 0.
+	
+	cur_states = [0 for state in T_states]
+
+	for start_state_index in range(len(M_states)*len(T_states)):
+		if stationary_dist_mixed[start_state_index] > 0.:
+			T_start_state = T_states[int(numpy.floor(start_state_index/float(len(M_states))))]
+			M_start_state = M_states[int(start_state_index - numpy.floor(start_state_index/float(len(M_states)))*len(M_states))]
+	
+			# Compute P(Y_{1}^{L} | X_{1}^{L}, S_{0}) and
+			# P(X_{1}^{L} | S_{0})
+	
+			p_eT = 1.
+			p_eM = 1.
+	
+			T_state_from = T_start_state
+			M_state_from = M_start_state
+	
+			for t in range(len(stringX)-1):
+				x = stringX[t]
+				y = stringY[t]
+		
+				T_state_to, pT_to = T_trans.get((T_state_from, x, y), (None, 0))
+		
+				if pT_to == 0:
+					p_eT = 0.
+				else:
+					p_eT = p_eT * pT_to
+		
+				T_state_from = T_state_to
+		
+				M_state_to, pM_to = M_trans.get((M_state_from, x), (None, 0))
+		
+				if pM_to == 0:
+					p_eM = 0.
+					break
+				else:
+					p_eM = p_eM * pM_to
+		
+				M_state_from = M_state_to
+			
+				if t == (len(stringX)-2):
+					p_joint_string_L += p_eT*p_eM*stationary_dist_mixed[start_state_index]
+					p_input_string_L += p_eM*stationary_dist_mixed[start_state_index]
+			
+			if len(stringY) == 0:
+				cur_states[T_states_to_index[T_state_from]] = 1
+			else:
+				if p_eT != 0:
+					cur_states[T_states_to_index[T_state_to]] = 1
+		
+			for ay_ind, ay in enumerate(ays):
+				x = stringX[-1]
+				y = ay
+			
+				T_state_to, pT_to = T_trans.get((T_state_from, x, y), (None, 0))
+		
+				if pT_to == 0:
+					p_eT_new = 0.
+				else:
+					p_eT_new = p_eT * pT_to
+		
+				M_state_to, pM_to = M_trans.get((M_state_from, x), (None, 0))
+		
+				if pM_to == 0:
+					p_eM_new = 0.
+					break
+				else:
+					p_eM_new = p_eM * pM_to
+		
+				p_joint_string_Lp1[ay_ind] += p_eT_new*p_eM_new*stationary_dist_mixed[start_state_index]
+			p_input_string_Lp1 += p_eM_new*stationary_dist_mixed[start_state_index]
+
+	if len(stringX) == 1:
+		if p_input_string_Lp1 == 0:
+			# print 'This input/output pair is not allowed by the machine/transducer pair.'
+		
+			return [numpy.nan for y in ays], cur_states
+		else:
+			return (numpy.array(p_joint_string_Lp1) / p_input_string_Lp1), cur_states
+	else:
+		if p_input_string_Lp1 == 0 or p_input_string_L == 0 or p_joint_string_L / p_input_string_L == 0:
+			# print 'This input/output pair is not allowed by the transducer.'
+		
+			return [numpy.nan for y in ays], cur_states
+		else:
+			return (numpy.array(p_joint_string_Lp1) / p_input_string_Lp1)/(p_joint_string_L / p_input_string_L), cur_states
+
+def compute_output_transition_matrix(machine_fname, transducer_fname, axs, ays, inf_alg):
+	"""
+	Given an epsilon-machine for the input process and an epsilon-transducer
+	for the input-output process, compute_output_transition_matrix returns
+	the transition matrix for the mixed state representation of the 
+	output process. The mixed states correspond to the direct product
+	of the input causal states and the channel causal states.
+	
+	Note: This is *not* the minimal representation of the output process,
+	though it can be minimized to become so.
+
+	Parameters
+	----------
+	machine_fname : string
+			The path to the input epsilon-machine in dot format.
+	transducer_fname : string
+			The path to the input-output epsilon-transducer
+			in dot format.
+	axs : list
+			The input alphabet.
+	ays : list
+			The output alphabet.
+	inf_alg : string
+			The inference algorithm used to estimate the machine.
+			One of {'CSSR', 'transCSSR'}
+
+	Returns
+	-------
+	P : numpy array
+			The transition matrix for the Markov
+			chain associated with the mixed states.
+	T_states_to_index : dict
+			An ordered lookup for the channel
+			causal states.
+	M_states_to_index : dict
+			An ordered lookup for the machine
+			causal states.
+
+	Notes
+	-----
+	Any notes go here.
+
+	Examples
+	--------
+	>>> import module_name
+	>>> # Demonstrate code here.
+
+	"""
+	# Read in the transition matrices for the 
+	# input process epsilon-machine and the
+	# epsilon-transducer.
+
+	T_trans, T_states = load_transition_matrix_transducer('{}'.format(transducer_fname))
+	M_trans, M_states = load_transition_matrix_machine('{}'.format(machine_fname), inf_alg = inf_alg)
+
+	# Determine the number of states resulting from a
+	# direct product of the epsilon-machine and
+	# epsilon-transducer states.
+
+	num_mixed_states = len(T_states)*len(M_states)
+
+	# Store the mixed state-to-mixed state transition
+	# probabilities.
+
+	# Note: We store these as P[i, j] = P(S_{1} = i | S_{0} = j),
+	# e.g. p_{i<-j}, the opposite of the usual way of storing
+	# transition probabilities. We do this so that we can
+	# compute the *right* eigenvectors of the transition matrix
+	# instead of the left eigenvectors.
+	
+	P = {}
+	
+	for ay in ays:
+		P[ay] = numpy.zeros(shape = (num_mixed_states, num_mixed_states))
+
+	# Create an ordered lookup for the transducer and 
+	# machine states.
+
+	T_states_to_index = {}
+	M_states_to_index = {}
+
+	for s, T_state in enumerate(T_states):
+		T_states_to_index[T_state] = s
+
+	for s, M_state in enumerate(M_states):
+		M_states_to_index[M_state] = s
+
+	mixed_state_labels = []
+
+	for ST in T_states:
+		i_from = T_states_to_index[ST]
+	
+		T_offset_from = len(M_states)*i_from
+		for SM in M_states:
+			j_from = M_states_to_index[SM]
+		
+			M_offset_from = j_from
+		
+			mixed_state_labels.append((ST, SM))
+
+	# Populate P by traversing *from* each
+	# mixed state, and accumulating the probability
+	# for the states transitioned *to*.
+
+	for ST in T_states:
+		i_from = T_states_to_index[ST]
+	
+		T_offset_from = len(M_states)*i_from
+		for SM in M_states:
+			j_from = M_states_to_index[SM]
+		
+			M_offset_from = j_from
+		
+			for ax in axs:
+				SM_to, pM_to = M_trans.get((SM, ax), (None, 0))
+			
+				if SM_to != None:
+					j_to = M_states_to_index[SM_to]
+			
+					M_offset_to = j_to
+			
+					for ay in ays:
+						ST_to, pT_to = T_trans.get((ST, ax, ay), (None, 0))
+					
+						if ST_to != None:				
+							i_to = T_states_to_index[ST_to]
+				
+							T_offset_to = len(M_states)*i_to
+				
+							P[ay][T_offset_to + M_offset_to, T_offset_from + M_offset_from] += pT_to*pM_to
+	
+	return P, T_states_to_index, M_states_to_index, T_trans, M_trans
